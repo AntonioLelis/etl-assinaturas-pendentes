@@ -32,9 +32,26 @@ def processar_dados(file):
 
     df['ID'] = df['ID'].ffill()
 
+    # 1. Extração do CPF
     df_cpfs = df[df['Profissional'].astype(str).str.contains('CPF:', na=False)][['ID', 'Profissional']]
     df_cpfs = df_cpfs.rename(columns={'Profissional': 'CPF'})
     df_cpfs['CPF'] = df_cpfs['CPF'].str.replace('CPF:', '').str.strip()
+    df_cpfs = df_cpfs.drop_duplicates(subset=['ID'])
+
+    # Localiza a coluna de Ficha Cadastral de forma segura (ignora espaços invisíveis no cabeçalho)
+    col_ficha = [c for c in df.columns if 'Ficha' in str(c)][0]
+
+    # 2. Extração de CNPJ
+    df_cnpj = df[df[col_ficha].astype(str).str.contains('CNPJ', na=False, case=False)][['ID', col_ficha]]
+    df_cnpj = df_cnpj.rename(columns={col_ficha: 'CNPJ'})
+    df_cnpj['CNPJ'] = df_cnpj['CNPJ'].str.replace('CNPJ', '', case=False).str.strip()
+    df_cnpj = df_cnpj.drop_duplicates(subset=['ID'])
+
+    # 3. Extração de Observação / Cargo Adicional (Tudo que estiver entre parênteses)
+    df_obs = df[df[col_ficha].astype(str).str.strip().str.startswith('(')][['ID', col_ficha]]
+    df_obs = df_obs.rename(columns={col_ficha: 'Observação'})
+    df_obs['Observação'] = df_obs['Observação'].str.replace('(', '').str.replace(')', '').str.strip()
+    df_obs = df_obs.drop_duplicates(subset=['ID'])
 
     df['Profissional'] = df['Profissional'].apply(lambda x: np.nan if str(x).startswith('CPF:') else x)
     df['Profissional'] = df['Profissional'].ffill()
@@ -44,14 +61,16 @@ def processar_dados(file):
 
     df['Data Última Assinatura'] = df['Data Última Assinatura'].apply(converter_data_excel)
 
-    # --- CORREÇÃO DOS DECIMAIS (.0) ---
-    # Convertendo para numérico e depois forçando o tipo 'Int64' (Inteiro que aceita nulos)
     df['ID'] = pd.to_numeric(df['ID'], errors='coerce').astype('Int64')
     df['Qtd Doc. Pendente'] = pd.to_numeric(df['Qtd Doc. Pendente'], errors='coerce').astype('Int64')
 
     df['Vínculo (RH)'] = df['Vínculo (RH)'].str.strip().replace('---', 'Externo')
 
+    # Consolidando as extrações usando JOIN (Merge)
     df = pd.merge(df, df_cpfs, on='ID', how='left')
+    df = pd.merge(df, df_cnpj, on='ID', how='left')
+    df = pd.merge(df, df_obs, on='ID', how='left')
+
     df = df.dropna(subset=['CBO - Unidade - Ativo no CNES'])
 
     def extrair_dados_cbo(texto):
@@ -65,8 +84,9 @@ def processar_dados(file):
 
     df[['Unidade', 'Ativo no CNES']] = df['CBO - Unidade - Ativo no CNES'].apply(extrair_dados_cbo)
 
+    # Nova ordem das colunas contemplando as novas extrações
     colunas_finais = [
-        'ID', 'CPF', 'Profissional', 'Vínculo (RH)', 'Unidade', 'Ativo no CNES',
+        'ID', 'CPF', 'CNPJ', 'Profissional', 'Vínculo (RH)', 'Observação', 'Unidade', 'Ativo no CNES',
         'Qtd Doc. Pendente', 'Data Última Assinatura', 'Liberação'
     ]
     return df[colunas_finais]
@@ -134,7 +154,6 @@ if uploaded_file is not None:
 
     st.subheader("📋 Detalhamento dos Registros")
 
-    # Configuração de formatação extra para garantir que o Streamlit não coloque vírgula de milhar no ID
     formatacao = {'ID': '{:.0f}'}
 
     st.dataframe(
@@ -147,7 +166,6 @@ if uploaded_file is not None:
     st.sidebar.divider()
     st.sidebar.header("📥 Exportar Dados")
 
-    # 1. Download CSV
     csv = df_filtrado.to_csv(sep=';', index=False).encode('utf-8')
     st.sidebar.download_button(
         label="📄 Baixar em CSV",
@@ -157,8 +175,7 @@ if uploaded_file is not None:
         use_container_width=True
     )
 
-    # 2. Download Excel
-    buffer = io.BytesIO()  # Cria um arquivo Excel na memória
+    buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         df_filtrado.to_excel(writer, index=False, sheet_name='Filtrados')
 
